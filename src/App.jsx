@@ -37,33 +37,25 @@ const App = () => {
     }
   }, [error]);
 
-  const fetchWithRetry = async (payload, retries = 3) => {
-    for (let i = 0; i < retries; i++) {
-      try {
-        const res = await fetch(API_ENDPOINT, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
+  // Edge function owns retry policy (governance-aligned)
+  // Client makes single call, surfaces errors cleanly
+  const fetchAPI = async (payload) => {
+    const res = await fetch(API_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
 
-        const data = await res.json();
+    const data = await res.json();
 
-        if (!res.ok) {
-          // Handle rate limiting specifically
-          if (res.status === 429) {
-            throw new Error('Rate limit exceeded. Please wait a moment.');
-          }
-          throw new Error(data.error || `HTTP ${res.status}`);
-        }
-
-        return data;
-      } catch (err) {
-        if (i === retries - 1) throw err;
-        // Don't retry on rate limits
-        if (err.message.includes('Rate limit')) throw err;
-        await new Promise((r) => setTimeout(r, 2 ** i * 500));
+    if (!res.ok) {
+      if (res.status === 429) {
+        throw new Error('Rate limit exceeded. Please wait a moment.');
       }
+      throw new Error(data.error || `Request failed (${res.status})`);
     }
+
+    return data;
   };
 
   const analyzeSignal = async () => {
@@ -81,7 +73,7 @@ Format your response with these exact headers:
 Use senior, conservative, board-ready language. Focus on "human adaptive capacity" and "oversight bandwidth."`;
 
     try {
-      const data = await fetchWithRetry({
+      const data = await fetchAPI({
         contents: [
           {
             parts: [
@@ -112,7 +104,7 @@ Use senior, conservative, board-ready language. Focus on "human adaptive capacit
 Focus on 'Institutional Foresight' and 'Risk Visibility'. Use high-altitude, professional tone.`;
 
     try {
-      const data = await fetchWithRetry({
+      const data = await fetchAPI({
         contents: [{ parts: [{ text: 'Generate 3 foresight questions.' }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
       });
@@ -133,7 +125,7 @@ Focus on 'Institutional Foresight' and 'Risk Visibility'. Use high-altitude, pro
     setError('');
 
     try {
-      const data = await fetchWithRetry({
+      const data = await fetchAPI({
         contents: [
           {
             parts: [

@@ -1,10 +1,54 @@
 const GEMINI_ENDPOINT =
   'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent';
 
-// Simple in-memory rate limiting (resets on cold start)
+// --- RETRY POLICY (Governance-Aligned) ---
+// Retries are a governance decision, not a convenience feature.
+// Different modes = different risk + cost profiles.
+const RETRY_POLICY = {
+  analysis: { retries: 2, baseDelay: 500 },   // text, low cost, safe to retry
+  foresight: { retries: 1, baseDelay: 750 },  // advisory, retry once only
+  audio: { retries: 0, baseDelay: 0 },        // expensive, stateful, never retry
+};
+
+function isRetryableStatus(status) {
+  return [502, 503, 504].includes(status);
+}
+
+function detectMode(body) {
+  if (body?.generationConfig?.responseModalities?.includes('AUDIO')) {
+    return 'audio';
+  }
+  const text = body?.contents?.[0]?.parts?.[0]?.text?.toLowerCase() || '';
+  if (text.includes('foresight')) {
+    return 'foresight';
+  }
+  return 'analysis';
+}
+
+async function fetchGeminiWithPolicy(url, options, mode) {
+  const policy = RETRY_POLICY[mode];
+  let attempt = 0;
+
+  while (true) {
+    const res = await fetch(url, options);
+
+    if (res.ok) return res;
+
+    // Fail fast: no masking errors
+    if (attempt >= policy.retries || !isRetryableStatus(res.status)) {
+      return res;
+    }
+
+    const delay = policy.baseDelay * Math.pow(2, attempt);
+    await new Promise((r) => setTimeout(r, delay));
+    attempt++;
+  }
+}
+
+// --- RATE LIMITING ---
 const rateLimitMap = new Map();
-const RATE_LIMIT_WINDOW_MS = 60000; // 1 minute
-const RATE_LIMIT_MAX_REQUESTS = 20; // 20 requests per minute per IP
+const RATE_LIMIT_WINDOW_MS = 60000;
+const RATE_LIMIT_MAX_REQUESTS = 20;
 
 function isRateLimited(ip) {
   const now = Date.now();
@@ -23,12 +67,12 @@ function isRateLimited(ip) {
   return false;
 }
 
+// --- EDGE FUNCTION ---
 export const config = {
   runtime: 'edge',
 };
 
 export default async function handler(req) {
-  // Only allow POST
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'Method not allowed' }), {
       status: 405,
@@ -36,7 +80,6 @@ export default async function handler(req) {
     });
   }
 
-  // Rate limiting
   const ip =
     req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
     req.headers.get('x-real-ip') ||
@@ -46,59 +89,51 @@ export default async function handler(req) {
     console.log(`[RATE_LIMITED] IP: ${ip}`);
     return new Response(
       JSON.stringify({ error: 'Rate limit exceeded. Try again later.' }),
-      {
-        status: 429,
-        headers: { 'Content-Type': 'application/json' },
-      }
+      { status: 429, headers: { 'Content-Type': 'application/json' } }
     );
   }
 
-  // Validate API key exists server-side
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     console.error('[CONFIG_ERROR] GEMINI_API_KEY not configured');
     return new Response(
       JSON.stringify({ error: 'Service configuration error' }),
-      {
-        status: 500,
-        headers: { 'Content-Type': 'application/json' },
-      }
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
     );
   }
 
   try {
     const body = await req.json();
-
-    // Audit log
     const timestamp = new Date().toISOString();
-    const hasAudio = body?.generationConfig?.responseModalities?.includes('AUDIO');
+    const mode = detectMode(body);
+
     console.log(
-      `[GEMINI_REQUEST] ${timestamp} | IP: ${ip} | Type: ${hasAudio ? 'audio' : 'text'}`
+      `[GEMINI_REQUEST] ${timestamp} | IP: ${ip} | Mode: ${mode} | Retries: ${RETRY_POLICY[mode].retries}`
     );
 
-    // Proxy to Gemini
-    const response = await fetch(`${GEMINI_ENDPOINT}?key=${apiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    const response = await fetchGeminiWithPolicy(
+      `${GEMINI_ENDPOINT}?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      mode
+    );
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error(`[GEMINI_ERROR] ${timestamp} | Status: ${response.status} | ${errorText}`);
+      console.error(
+        `[GEMINI_ERROR] ${timestamp} | Mode: ${mode} | Status: ${response.status} | ${errorText}`
+      );
       return new Response(
         JSON.stringify({ error: 'Upstream API error', status: response.status }),
-        {
-          status: response.status,
-          headers: { 'Content-Type': 'application/json' },
-        }
+        { status: response.status, headers: { 'Content-Type': 'application/json' } }
       );
     }
 
     const data = await response.json();
-
-    // Log success
-    console.log(`[GEMINI_SUCCESS] ${timestamp} | IP: ${ip}`);
+    console.log(`[GEMINI_SUCCESS] ${timestamp} | IP: ${ip} | Mode: ${mode}`);
 
     return new Response(JSON.stringify(data), {
       status: 200,
@@ -108,10 +143,7 @@ export default async function handler(req) {
     console.error(`[PROXY_ERROR] ${err.message}`);
     return new Response(
       JSON.stringify({ error: 'Internal server error' }),
-      {
-        status: 500,
-        headers: { 'Content-Type': 'application/json' },
-      }
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
     );
   }
 }

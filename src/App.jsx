@@ -8,8 +8,7 @@ import {
   Volume2,
 } from 'lucide-react';
 
-const GEMINI_ENDPOINT =
-  'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent';
+const API_ENDPOINT = '/api/gemini';
 
 const App = () => {
   const [input, setInput] = useState('');
@@ -21,8 +20,6 @@ const App = () => {
   const [foresight, setForesight] = useState('');
   const [foresightLoading, setForesightLoading] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
-
-  const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
 
   useEffect(() => {
     const link = document.createElement('link');
@@ -43,15 +40,27 @@ const App = () => {
   const fetchWithRetry = async (payload, retries = 3) => {
     for (let i = 0; i < retries; i++) {
       try {
-        const res = await fetch(`${GEMINI_ENDPOINT}?key=${apiKey}`, {
+        const res = await fetch(API_ENDPOINT, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return await res.json();
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          // Handle rate limiting specifically
+          if (res.status === 429) {
+            throw new Error('Rate limit exceeded. Please wait a moment.');
+          }
+          throw new Error(data.error || `HTTP ${res.status}`);
+        }
+
+        return data;
       } catch (err) {
         if (i === retries - 1) throw err;
+        // Don't retry on rate limits
+        if (err.message.includes('Rate limit')) throw err;
         await new Promise((r) => setTimeout(r, 2 ** i * 500));
       }
     }
@@ -88,8 +97,8 @@ Use senior, conservative, board-ready language. Focus on "human adaptive capacit
         data?.candidates?.[0]?.content?.parts?.[0]?.text ??
           'No synthesis available.'
       );
-    } catch {
-      setError('A connection error occurred during the translational process.');
+    } catch (err) {
+      setError(err.message || 'A connection error occurred during the translational process.');
     } finally {
       setLoading(false);
     }
@@ -111,8 +120,8 @@ Focus on 'Institutional Foresight' and 'Risk Visibility'. Use high-altitude, pro
         data?.candidates?.[0]?.content?.parts?.[0]?.text ??
           'No foresight generated.'
       );
-    } catch {
-      setError('Failed to generate foresight questions.');
+    } catch (err) {
+      setError(err.message || 'Failed to generate foresight questions.');
     } finally {
       setForesightLoading(false);
     }
@@ -176,8 +185,8 @@ Focus on 'Institutional Foresight' and 'Risk Visibility'. Use high-altitude, pro
         URL.revokeObjectURL(audioUrl);
       };
       audio.play();
-    } catch {
-      setError('Audio briefing unavailable.');
+    } catch (err) {
+      setError(err.message || 'Audio briefing unavailable.');
       setIsPlaying(false);
     }
   };
